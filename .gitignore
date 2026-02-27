@@ -1,0 +1,29 @@
+# Configuration with API keys
+config.env
+
+# State files
+state/
+
+# Transcript cache
+transcripts/
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+venv/
+env/
+ENV/

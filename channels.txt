@@ -1,0 +1,15 @@
+# YouTube Channel Monitor - Channel List
+#
+# Add one channel ID per line. Lines starting with # are comments.
+# Empty lines are ignored.
+#
+# Format: CHANNEL_ID (the part after UC...)
+#
+# How to find a channel ID:
+# 1. Go to the channel's homepage
+# 2. View page source and search for "channelId"
+# 3. Or use: https://commentpicker.com/youtube-channel-id/
+#
+# Example channels:
+# UCBJycsmduvYEL83R_U4JriQ
+# UC8butISFpTf7lLu4Pso3EKg
