@@ -144,7 +144,7 @@ Edit `config.env` to customize:
 | Setting | Description | Default |
 |---------|-------------|---------|
 | `GLM_API_KEY` | Your Zhipu AI API key | *required* |
-| `GLM_MODEL` | Model to use for summaries | `glm-4-flash` |
+| `GLM_MODEL` | Model to use for summaries | `glm-4.7` |
 | `MAX_VIDEOS_PER_RUN` | Max videos to process per run | `3` |
 | `TRANSCRIPT_CACHE_DIR` | Directory to cache transcripts | `./transcripts` |
 | `STATE_DIR` | Directory for state files | `./state` |
@@ -155,7 +155,8 @@ Edit `config.env` to customize:
 
 | Model | Description |
 |-------|-------------|
-| `glm-4-flash` | Fast, cost-effective (recommended) |
+| `glm-4.7` | Latest high-performance model (recommended) |
+| `glm-4-flash` | Fast, cost-effective |
 | `glm-4` | Standard model |
 | `glm-4-plus` | More capable model |
 | `glm-4-air` | Balanced model |

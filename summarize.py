@@ -23,7 +23,7 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable
+    from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable, RequestBlocked
 except ImportError:
     print("Error: youtube-transcript-api not installed", file=sys.stderr)
     print("Install with: pip3 install youtube-transcript-api", file=sys.stderr)
@@ -31,11 +31,12 @@ except ImportError:
 
 
 # Configuration defaults for GLM
-DEFAULT_MODEL = "glm-4-flash"  # Fast, cost-effective model
+DEFAULT_MODEL = "glm-4.7"  # Latest GLM model
 # Alternative models:
 # "glm-4" - Standard model
 # "glm-4-plus" - More capable
 # "glm-4-flash" - Fast and cost-effective
+# "glm-4.7" - Latest high-performance model
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_DELAY = 5
 
@@ -113,27 +114,42 @@ def get_transcript(video_id: str) -> Tuple[Optional[List[Dict]], Optional[str]]:
         Returns (None, None) if transcript not available
     """
     try:
-        # Try to get transcript, preferring English
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # Create API instance and list transcripts
+        api = YouTubeTranscriptApi()
+        transcript_list = api.list(video_id)
 
         # Try to find English transcript first
         try:
             transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
             return transcript.fetch(), 'en'
         except NoTranscriptFound:
-            # Fall back to auto-generated English
-            try:
-                transcript = transcript_list.find_manually_created_transcript(['en', 'en-US', 'en-GB'])
-                return transcript.fetch(), 'en'
-            except NoTranscriptFound:
-                pass
+            pass
 
-        # No English, try any available transcript
+        # Fall back to any manually created transcript
+        try:
+            for transcript in transcript_list:
+                if not transcript.is_generated:
+                    return transcript.fetch(), transcript.language_code
+        except:
+            pass
+
+        # Fall back to auto-generated transcript
+        try:
+            transcript = transcript_list.find_generated_transcript(['en', 'en-US', 'en-GB'])
+            return transcript.fetch(), 'en'
+        except:
+            pass
+
+        # Try any available transcript
         for transcript in transcript_list:
             return transcript.fetch(), transcript.language_code
 
         return None, None
 
+    except RequestBlocked as e:
+        print(f"Warning: YouTube is blocking requests from this IP for video {video_id}", file=sys.stderr)
+        print("This is common when running from cloud servers. Consider using a proxy.", file=sys.stderr)
+        return None, None
     except (VideoUnavailable, TranscriptsDisabled) as e:
         print(f"Warning: Transcript not available for video {video_id}: {e}", file=sys.stderr)
         return None, None
@@ -286,6 +302,12 @@ def format_output(summary: str, video_info: Dict) -> str:
     separator = "=" * 40
     section_sep = "━" * 40
 
+    # Build URL separately to avoid nested f-string issues
+    video_id = video_info.get('video_id', '')
+    url = video_info.get('url', '')
+    if not url and video_id:
+        url = f'https://youtube.com/watch?v={video_id}'
+
     output = [
         separator,
         "📺 NEW VIDEO SUMMARY",
@@ -293,7 +315,7 @@ def format_output(summary: str, video_info: Dict) -> str:
         "",
         f"Channel: {video_info.get('channel_name', 'Unknown')}",
         f"Video: \"{video_info.get('title', 'Unknown Title')}\"",
-        f"URL: {video_info.get('url', f'https://youtube.com/watch?v={video_info.get(\"video_id\", \"\")}')}",
+        f"URL: {url}",
         f"Published: {format_relative_time(video_info.get('published', ''))}",
         "",
         section_sep,

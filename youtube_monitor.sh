@@ -41,13 +41,13 @@ load_config() {
         log_info "Loaded configuration from $CONFIG_FILE"
     else
         log_error "Configuration file not found: $CONFIG_FILE"
-        log_error "Please create config.env with your OpenAI API key"
+        log_error "Please create config.env with your GLM API key"
         exit 1
     fi
 
-    # Validate required settings
-    if [[ -z "${OPENAI_API_KEY:-}" ]] || [[ "$OPENAI_API_KEY" == "your_openai_api_key_here" ]]; then
-        log_error "OPENAI_API_KEY not set in config.env"
+    # Validate required settings (check for GLM_API_KEY)
+    if [[ -z "${GLM_API_KEY:-}" ]] || [[ "$GLM_API_KEY" == "your_glm_api_key_here" ]]; then
+        log_error "GLM_API_KEY not set in config.env"
         exit 1
     fi
 }
