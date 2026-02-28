@@ -539,33 +539,25 @@ def format_transcript_for_prompt(segments: List[Dict], max_length: int = 50000) 
 
 def create_summary_prompt(transcript: str) -> str:
     """Create the prompt for summarization."""
-    return f"""You are analyzing a YouTube video transcript. Create a detailed summary with timestamps and highlights.
+    return f"""You are analyzing a YouTube video transcript. Create a concise summary.
 
 Transcript with timestamps:
 {transcript}
 
-Please provide:
+Please provide these 2 sections (keep total output under 2000 characters):
 
-1. **Overview** - What is this video about? (2-3 sentences)
+1. Key Takeaways - 4-5 brief insights as bullet points (start each line with "•")
 
-2. **Key Topics Covered** - Bullet points of main topics (3-5 items)
+2. Detailed Summary with Timestamps - Break into 4-5 sections:
+   - Time range (start - end)
+   - Section title
+   - 2-3 sentences summary
 
-3. **Detailed Summary with Timestamps**
-   Break down the video into logical sections. For each section:
-   - Provide time range (start - end)
-   - Give the section a descriptive title
-   - Summarize what's covered in 2-3 sentences
+Be concise. Do NOT use asterisks or bold markers in your output.
 
-4. **Highlights & Quotes** - Notable insights or memorable quotes with timestamps (3-5 items)
-
-5. **Takeaways** - 3-5 key actionable points or conclusions
-
-Format the output cleanly in plain text. Use emojis as section markers:
-📋 for Overview
-🎯 for Key Topics
-⏱️ for Detailed Summary
-💡 for Highlights & Quotes
-✅ for Key Takeaways"""
+Section headers must be exactly:
+Key Takeaways
+Detailed Summary with Timestamps"""
 
 
 def summarize_with_glm(transcript: str, video_info: Dict, config: Dict) -> Optional[str]:
@@ -586,13 +578,13 @@ def summarize_with_glm(transcript: str, video_info: Dict, config: Dict) -> Optio
         api_key = config.get('OPENAI_API_KEY', os.environ.get('OPENAI_API_KEY'))
         if not api_key:
             print("Error: GLM_API_KEY not set in config.env", file=sys.stderr)
-            print("Get your API key from: https://open.bigmodel.cn/", file=sys.stderr)
+            print("Get your API key from: https://z.ai/", file=sys.stderr)
             return None
 
     model = config.get('GLM_MODEL', os.environ.get('GLM_MODEL', DEFAULT_MODEL))
 
     try:
-        client = ZhipuAI(api_key=api_key)
+        client = ZhipuAI(api_key=api_key, base_url='https://api.z.ai/api/coding/paas/v4')
     except Exception as e:
         print(f"Error initializing GLM client: {e}", file=sys.stderr)
         return None
@@ -640,23 +632,49 @@ def format_output(summary: str, video_info: Dict) -> str:
     if not url and video_id:
         url = f'https://youtube.com/watch?v={video_id}'
 
+    # Get metadata with fallbacks
+    channel = video_info.get('channel_name', 'Unknown')
+    title = video_info.get('title', 'Unknown Title')
+    published = video_info.get('published', '')
+
     output = [
         separator,
-        "📺 NEW VIDEO SUMMARY",
+        "<b>📺 NEW VIDEO SUMMARY</b>",
         separator,
         "",
-        f"Channel: {video_info.get('channel_name', 'Unknown')}",
-        f"Video: \"{video_info.get('title', 'Unknown Title')}\"",
-        f"URL: {url}",
-        f"Published: {format_relative_time(video_info.get('published', ''))}",
-        "",
-        section_sep,
-        summary,
-        "",
-        section_sep,
-        f"Processed: {datetime.now(timezone.utc).strftime('%B %d, %Y @ %H:%M UTC')}",
-        separator,
+        f"<b>Channel:</b> {channel}",
+        f"<b>Video:</b> \"{title}\"",
+        f"<b>URL:</b> {url}",
     ]
+
+    if published:
+        output.append(f"<b>Published:</b> {format_relative_time(published)}")
+
+    # Add bold tags and emojis to section headers in summary
+    summary_bolded = summary.replace("Key Takeaways", "<b>✅ Key Takeaways</b>")
+    summary_bolded = summary_bolded.replace("Detailed Summary with Timestamps", "<b>⏱️ Detailed Summary with Timestamps</b>")
+
+    # Add italic tags to timestamp section headers only (not descriptions)
+    lines = summary_bolded.split('\n')
+    formatted_lines = []
+    for line in lines:
+        # Check if line looks like a timestamp header (e.g., "00:00 - 03:30" or "00:00 - 09:30: Title")
+        # Only italicize the line if it starts with a timestamp pattern
+        if re.match(r'^\d{2}:\d{2}\s*-\s*(\d{2}:\d{2}|End)', line):
+            formatted_lines.append(f"<i>{line}</i>")
+        else:
+            formatted_lines.append(line)
+    summary_bolded = '\n'.join(formatted_lines)
+
+    output.extend([
+        "",
+        section_sep,
+        summary_bolded,
+        "",
+        section_sep,
+        f"<i>Processed: {datetime.now(timezone.utc).strftime('%B %d, %Y @ %H:%M UTC')}</i>",
+        separator,
+    ])
 
     return '\n'.join(output)
 
@@ -820,7 +838,15 @@ def main():
         if args.debug:
             print(f"Fetching transcript for video: {args.video_id}", file=sys.stderr)
 
-        segments, lang = get_transcript(args.video_id, config)
+        # Build metadata for cache
+        metadata = {
+            'title': args.title,
+            'channel_name': args.channel,
+            'url': args.url or f'https://youtube.com/watch?v={args.video_id}',
+            'published': args.published
+        }
+
+        segments, lang = get_transcript(args.video_id, config, metadata=metadata)
 
         if not segments:
             print(f"Error: No transcript available for video {args.video_id}", file=sys.stderr)

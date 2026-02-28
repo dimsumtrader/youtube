@@ -1,12 +1,6 @@
 # Configuration with API keys
 config.env
 
-# State files
-state/
-
-# Transcript cache
-transcripts/
-
 # Logs
 logs/
 *.log
@@ -18,7 +12,7 @@ __pycache__/
 *.pyd
 .Python
 *.so
-*.egg
+.egg
 *.egg-info/
 dist/
 build/
