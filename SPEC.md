@@ -6,9 +6,10 @@ An automated system that monitors YouTube channels for new videos, downloads the
 ## Goals
 - Automatically check YouTube channels for new content
 - Download video transcripts
-- Generate detailed, timestamped summaries using OpenAI
+- Generate detailed, timestamped summaries using GLM (Zhipu AI)
 - Only process each video once
 - Output to stdout for pipelining
+- Bypass YouTube's cloud IP blocks using proxies or official API
 
 ## Non-Goals
 - Video downloading (transcripts only)
@@ -21,15 +22,16 @@ An automated system that monitors YouTube channels for new videos, downloads the
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Cron      │────▶│   Bash      │────▶│   Python    │────▶│   OpenAI    │────▶ stdout
-│   Scheduler │     │   Monitor   │     │   Summarizer│     │   API       │
+│   Cron      │────▶│   Bash      │────▶│   Python    │────▶│    GLM      │────▶ stdout
+│  Scheduler  │     │   Monitor   │     │  Summarizer │     │    API      │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │   State     │
-                    │   Files     │
-                    └─────────────┘
+                           │                    │
+                           ▼                    ▼
+                    ┌─────────────┐     ┌─────────────┐
+                    │   State     │     │   Proxy /   │
+                    │   Files     │     │  YouTube    │
+                    └─────────────┘     │    API      │
+                                        └─────────────┘
 ```
 
 ## Components
@@ -51,15 +53,18 @@ An automated system that monitors YouTube channels for new videos, downloads the
 - `python3` - Python runtime
 
 **Python:**
-- `youtube-transcript-api` - Transcript fetching
-- `openai` - OpenAI API client
-- `requests` - HTTP library
+- `zhipuai` - GLM API client
+
+**External Tools:**
+- `supadata.ai` - Transcript API (primary method)
+- `yt-dlp` - Video metadata and transcript fetching (fallback)
+- `node` (v24+) - JavaScript runtime for YouTube's n-challenge (yt-dlp)
 
 ---
 
 ## Development Phases
 
-### Phase 1: Foundation
+### Phase 1: Foundation ✅ COMPLETED
 **Goal:** Set up project structure and configuration
 
 Deliverables:
@@ -72,7 +77,7 @@ Deliverables:
 
 ---
 
-### Phase 2: RSS Feed Monitor
+### Phase 2: RSS Feed Monitor ✅ COMPLETED
 **Goal:** Bash script to fetch and parse YouTube RSS feeds
 
 Deliverables:
@@ -88,7 +93,7 @@ Deliverables:
 
 ---
 
-### Phase 3: State Management
+### Phase 3: State Management ✅ COMPLETED
 **Goal:** Track seen and summarized videos
 
 Deliverables:
@@ -101,25 +106,24 @@ Deliverables:
 
 ---
 
-### Phase 4: Transcript Download
+### Phase 4: Transcript Download ✅ COMPLETED
 **Goal:** Python script to fetch video transcripts
 
 Deliverables:
 - `summarize.py` - Python script
-- Transcript fetching using `youtube-transcript-api`
+- Transcript fetching using supadata.ai (primary) and yt-dlp (fallback)
 - Timestamp and segment extraction
 - Error handling for missing/unavailable transcripts
-- Fallback mechanisms
 
 **Success Criteria:** Can download transcript for any video ID
 
 ---
 
-### Phase 5: OpenAI Integration
-**Goal:** Send transcripts to OpenAI for summarization
+### Phase 5: GLM Integration ✅ COMPLETED
+**Goal:** Send transcripts to GLM (Zhipu AI) for summarization
 
 Deliverables:
-- OpenAI API client setup
+- GLM API client setup
 - Prompt template for timestamped summaries
 - Response parsing and formatting
 - Error handling for API failures
@@ -128,7 +132,7 @@ Deliverables:
 
 ---
 
-### Phase 6: Integration & Output
+### Phase 6: Integration & Output ✅ COMPLETED
 **Goal:** Connect all components and produce final output
 
 Deliverables:
@@ -141,7 +145,7 @@ Deliverables:
 
 ---
 
-### Phase 7: Scheduling & Reliability
+### Phase 7: Scheduling & Reliability ✅ COMPLETED
 **Goal:** Production-ready automation
 
 Deliverables:
@@ -151,6 +155,31 @@ Deliverables:
 - Rate limiting
 
 **Success Criteria:** System runs reliably via cron
+
+---
+
+### Phase 8: Cloud IP Bypass ✅ COMPLETED
+**Goal:** Bypass YouTube's cloud IP blocks
+
+**Issue:** YouTube blocks requests from cloud provider IPs (AWS, GCP, Azure)
+
+**Solutions Implemented:**
+
+1. **Supadata.ai API** ✅ IMPLEMENTED (PRIMARY)
+   - Professional transcript API service
+   - No authentication/IP issues
+   - Supports YouTube, TikTok, Instagram, X, Facebook
+   - Config: `SUPADATA_API_KEY`, `USE_SUPADATA`
+
+2. **yt-dlp with Browser Cookies** ✅ IMPLEMENTED (FALLBACK)
+   - Uses yt-dlp with exported browser cookies
+   - Node.js runtime for YouTube's n-challenge solving
+   - Config: `YOUTUBE_COOKIES_FILE`, `USE_YTDLP`
+
+3. **Transcript Deduplication** ✅ IMPLEMENTED
+   - Filters out short intermediate caption segments (< 0.3s)
+   - Eliminates duplicate text from progressive captioning
+   - Cleaner transcripts for AI summarization
 
 ---
 
@@ -257,7 +286,7 @@ Processed: {timestamp}
 
 ---
 
-## OpenAI Prompt Template
+## GLM Prompt Template
 
 ```
 You are analyzing a YouTube video transcript. Create a detailed summary with timestamps and highlights.
@@ -281,7 +310,12 @@ Please provide:
 
 5. **Takeaways** - 3-5 key actionable points or conclusions
 
-Format the output cleanly in plain text. Use emojis as section markers.
+Format the output cleanly in plain text. Use emojis as section markers:
+📋 for Overview
+🎯 for Key Topics
+⏱️ for Detailed Summary
+💡 for Highlights & Quotes
+✅ for Key Takeaways
 ```
 
 ---
@@ -294,10 +328,11 @@ Format the output cleanly in plain text. Use emojis as section markers.
 | RSS parse error | Log warning, continue to next channel |
 | No transcript available | Log warning, mark as seen, skip |
 | Transcript API rate limit | Exponential backoff |
-| OpenAI API error | Log error, skip video, retry next run |
+| GLM API error | Log error, skip video, retry next run |
 | Invalid video ID | Skip and continue |
 | Missing config | Exit with error message |
 | State file corruption | Recreate from scratch |
+| Cookies expired | Re-export cookies from browser |
 
 ---
 
@@ -305,9 +340,17 @@ Format the output cleanly in plain text. Use emojis as section markers.
 
 `config.env`:
 ```bash
-# OpenAI API
-OPENAI_API_KEY="sk-..."
-OPENAI_MODEL="gpt-4o"
+# GLM API (Zhipu AI)
+GLM_API_KEY="..."
+GLM_MODEL="glm-4.7"
+
+# Supadata.ai Configuration (primary transcript method)
+SUPADATA_API_KEY="..."
+USE_SUPADATA="true"
+
+# yt-dlp Configuration (fallback transcript method)
+YOUTUBE_COOKIES_FILE="/path/to/youtube_cookies.txt"
+USE_YTDLP="true"
 
 # Processing
 MAX_VIDEOS_PER_RUN=3
@@ -332,7 +375,7 @@ UC8butISFpTf7lLu4Pso3EKg
 ### Unit Testing
 - Transcript fetch function
 - State file I/O
-- OpenAI prompt formatting
+- GLM prompt formatting
 
 ### Integration Testing
 - Full RSS → transcript → summary flow
@@ -346,3 +389,14 @@ UC8butISFpTf7lLu4Pso3EKg
 4. Run again (verify no duplicates)
 5. Add new video to channel
 6. Run again (verify new video processed)
+
+---
+
+## Known Issues
+
+| Issue | Status | Solution |
+|-------|--------|----------|
+| YouTube blocks cloud IPs | ✅ SOLVED | Supadata.ai API (primary) + yt-dlp fallback |
+| Supadata.ai rate limits | ⚠️ MAINTENANCE | Falls back to yt-dlp automatically |
+| Cookies may expire periodically | ⚠️ MAINTENANCE | Re-export cookies when needed |
+| yt-dlp requires Node.js for n-challenge | ✅ DOCUMENTED | Node.js v24+ recommended |

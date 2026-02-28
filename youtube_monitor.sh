@@ -19,6 +19,7 @@ SUMMARIZE_PY="${SCRIPT_DIR}/summarize.py"
 # Default values (can be overridden by config.env)
 MAX_VIDEOS_PER_RUN=${MAX_VIDEOS_PER_RUN:-3}
 API_CALL_DELAY=${API_CALL_DELAY:-2}
+MIN_VIDEO_LENGTH_SECONDS=${MIN_VIDEO_LENGTH_SECONDS:-60}
 
 # Logging functions
 log_info() {
@@ -149,74 +150,25 @@ load_channels() {
     grep -v '^[[:space:]]*#' "$CHANNELS_FILE" | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
 }
 
-# Fetch RSS feed for a channel
-fetch_rss() {
+# Fetch videos from channel using yt-dlp
+fetch_channel_videos() {
     local channel_id="$1"
-    local rss_url="https://www.youtube.com/feeds/videos.xml?channel_id=${channel_id}"
+    local max_videos="${2:-50}"
 
-    local response
-    response=$(curl -sSL --max-time 30 --fail "$rss_url" 2>&1) || {
-        log_warn "Failed to fetch RSS feed for channel $channel_id"
-        return 1
-    }
-
-    echo "$response"
-}
-
-# Parse RSS feed and extract video data
-parse_rss() {
-    local rss_xml="$1"
-    local channel_id="$2"
-
-    # Extract channel name
-    local channel_name
-    channel_name=$(echo "$rss_xml" | grep -oP '<author><name>\K[^<]+' || echo "Unknown Channel")
-
-    # Extract video entries using xmlstarlet or grep
-    # Each entry has: <yt:videoId>...</yt:videoId>, <title>...</title>, <published>...</published>
-    local video_ids
-    local titles
-    local published_dates
-
-    video_ids=$(echo "$rss_xml" | grep -oP '<yt:videoId>\K[^<]+' || true)
-    titles=$(echo "$rss_xml" | grep -oP '<media:title>\\s*\K[^<]+' || echo "$rss_xml" | grep -oP '<title>\K[^<]+' | tail -n +2 || true)
-    published_dates=$(echo "$rss_xml" | grep -oP '<published>\K[^<]+' || true)
-
-    # Return as JSON array
-    local videos_json="["
-    local first=true
-
-    local vid_array
-    mapfile -t vid_array <<< "$video_ids"
-
-    local title_array
-    mapfile -t title_array <<< "$titles"
-
-    local pub_array
-    mapfile -t pub_array <<< "$published_dates"
-
-    local i=0
-    for vid in "${vid_array[@]}"; do
-        if [[ -n "$vid" ]]; then
-            local title="${title_array[$i]:-Unknown Title}"
-            local published="${pub_array[$i]:-unknown}"
-
-            # Escape title for JSON
-            title=$(echo "$title" | sed 's/"/\\"/g')
-
-            if [[ "$first" == "true" ]]; then
-                first=false
-            else
-                videos_json+=","
-            fi
-
-            videos_json+="{\"video_id\":\"$vid\",\"title\":\"$title\",\"channel_id\":\"$channel_id\",\"channel_name\":\"$channel_name\",\"url\":\"https://youtube.com/watch?v=$vid\",\"published\":\"$published\"}"
-        fi
-        ((i++)) || true
-    done
-
-    videos_json+="]"
-    echo "$videos_json"
+    # Use yt-dlp to get channel videos and directly output formatted JSON
+    yt-dlp --dump-json --flat-playlist --playlist-end "$max_videos" \
+        --no-warnings "https://www.youtube.com/channel/$channel_id" 2>/dev/null | \
+        jq -c --arg cid "$channel_id" \
+            '{
+                video_id: .id,
+                title: .title,
+                channel_id: $cid,
+                channel_name: (.channel // "Unknown"),
+                url: "https://youtube.com/watch?v=\(.id)",
+                published: (if .upload_date and (.upload_date | length) >= 8 then "\(.upload_date[0:4])-\(.upload_date[4:6])-\(.upload_date[6:8])T00:00:00Z" else "" end),
+                duration: (.duration // 0)
+            }' | \
+        jq -s .
 }
 
 # Format relative time
@@ -240,7 +192,35 @@ format_relative_time() {
     fi
 }
 
-# Process a single video
+# Process a single video (fetch transcript only)
+fetch_transcript_only() {
+    local video_data="$1"
+
+    local video_id
+    video_id=$(echo "$video_data" | jq -r '.video_id')
+    local title
+    title=$(echo "$video_data" | jq -r '.title')
+
+    log_info "Fetching transcript: $title ($video_id)"
+
+    # Check if already cached
+    local cache_dir="${TRANSCRIPT_CACHE_DIR:-./transcripts}"
+    if [[ -f "$cache_dir/$video_id.json" ]]; then
+        log_info "Transcript already cached: $video_id"
+        return 0
+    fi
+
+    # Call summarize.py with --fetch-only (use -- to handle IDs starting with -)
+    if python3 "$SUMMARIZE_PY" --fetch-only -- "$video_id" 2>&1; then
+        log_info "Successfully cached transcript: $video_id"
+        return 0
+    else
+        log_warn "Failed to fetch transcript: $video_id"
+        return 1
+    fi
+}
+
+# Process a single video (summarize)
 process_video() {
     local video_data="$1"
 
@@ -288,12 +268,18 @@ process_video() {
 main() {
     local total_new=0
     local total_summarized=0
+    local total_fetched=0
     local max_videos=$MAX_VIDEOS_PER_RUN
+    local fetch_only_mode="${FETCH_ONLY:-false}"
 
     mkdir -p "$LOG_DIR"
 
     log_info "=========================================="
-    log_info "YouTube Channel Monitor - Starting"
+    if [[ "$fetch_only_mode" == "true" ]]; then
+        log_info "YouTube Channel Monitor - Fetch Only Mode"
+    else
+        log_info "YouTube Channel Monitor - Starting"
+    fi
     log_info "=========================================="
 
     # Load configuration
@@ -315,29 +301,71 @@ main() {
 
     log_info "Monitoring ${#channels[@]} channels"
 
-    # Collect all new videos
-    local all_new_videos="[]"
+    # Collect all unsummarized videos (including previously seen but not summarized)
+    local all_unsummarized_videos="[]"
+
+    # Create temp files for state (avoid argument length limits)
+    local seen_tmp
+    local summarized_tmp
+    seen_tmp=$(mktemp)
+    summarized_tmp=$(mktemp)
+    echo "$SEEN_VIDEOS" > "$seen_tmp"
+    echo "$SUMMARIZED" > "$summarized_tmp"
 
     for channel_id in "${channels[@]}"; do
         log_info "Checking channel: $channel_id"
 
-        local rss_xml
-        if rss_xml=$(fetch_rss "$channel_id"); then
-            local videos_json
-            videos_json=$(parse_rss "$rss_xml" "$channel_id")
+        local videos_json
+        if videos_json=$(fetch_channel_videos "$channel_id" 50); then
+            # First, add any truly new videos to seen_videos (discovery phase)
+            local truly_new_videos
+            truly_new_videos=$(jq --slurpfile seen "$seen_tmp" \
+                '[.[] | select(.video_id as $vid | $seen[0] | has($vid) | not)]' <<< "$videos_json")
 
-            # Filter out already seen videos
-            local new_videos
-            new_videos=$(echo "$videos_json" | jq --argjson seen "$SEEN_VIDEOS" '[.[] | select(.video_id as $vid | $seen | has($vid) | not)]')
+            local truly_new_count
+            truly_new_count=$(echo "$truly_new_videos" | jq 'length')
 
-            local new_count
-            new_count=$(echo "$new_videos" | jq 'length')
+            if [[ "$truly_new_count" -gt 0 ]]; then
+                log_info "Discovered $truly_new_count new video(s) from $channel_id"
+                # Add each new video to seen_videos immediately
+                for ((j = 0; j < truly_new_count; j++)); do
+                    local new_vid_data
+                    new_vid_data=$(echo "$truly_new_videos" | jq ".[$j]")
+                    local new_vid_id
+                    new_vid_id=$(echo "$new_vid_data" | jq -r '.video_id')
+                    local new_vid_title
+                    new_vid_title=$(echo "$new_vid_data" | jq -r '.title')
+                    add_seen_video "$new_vid_id" "$new_vid_title" "$channel_id"
+                    # Update temp file
+                    echo "$SEEN_VIDEOS" > "$seen_tmp"
+                done
+            fi
 
-            if [[ "$new_count" -gt 0 ]]; then
-                log_info "Found $new_count new videos from $channel_id"
-                all_new_videos=$(echo "$all_new_videos" | jq --argjson new "$new_videos" '. + $new')
+            # Now collect unsummarized videos for processing (filter by duration and summarized status)
+            local min_sec="${MIN_VIDEO_LENGTH_SECONDS:-60}"
+            local unsummarized_videos
+            unsummarized_videos=$(jq --slurpfile summarized "$summarized_tmp" \
+                --argjson min_sec "$min_sec" \
+                '[.[] | select(.video_id as $vid | $summarized[0] | has($vid) | not) | select(.duration >= $min_sec)]' <<< "$videos_json")
+
+            local unsummarized_count
+            unsummarized_count=$(echo "$unsummarized_videos" | jq 'length')
+
+            # Calculate how many were filtered as Shorts
+            local short_count
+            short_count=$(jq --slurpfile summarized "$summarized_tmp" \
+                --argjson min_sec "$min_sec" \
+                '[.[] | select(.video_id as $vid | $summarized[0] | has($vid) | not) | select(.duration < $min_sec)] | length' <<< "$videos_json")
+
+            if [[ "$short_count" -gt 0 ]]; then
+                log_info "Filtered out $short_count YouTube Shorts from $channel_id"
+            fi
+
+            if [[ "$unsummarized_count" -gt 0 ]]; then
+                log_info "Found $unsummarized_count video(s) to summarize from $channel_id"
+                all_unsummarized_videos=$(jq --argjson new "$unsummarized_videos" '. + $new' <<< "$all_unsummarized_videos")
             else
-                log_info "No new videos from $channel_id"
+                log_info "No videos to summarize from $channel_id (all already processed)"
             fi
         fi
 
@@ -348,76 +376,89 @@ main() {
         mv "$tmp_file" "$SEEN_VIDEOS_FILE"
     done
 
-    # Get count of new videos
-    local new_video_count
-    new_video_count=$(echo "$all_new_videos" | jq 'length')
-    total_new=$new_video_count
+    # Clean up temp files
+    rm -f "$seen_tmp" "$summarized_tmp"
 
-    log_info "Total new videos: $new_video_count"
+    # Get count of unsummarized videos
+    local unsummarized_video_count
+    unsummarized_video_count=$(echo "$all_unsummarized_videos" | jq 'length')
+    total_new=$unsummarized_video_count
 
-    if [[ "$new_video_count" -eq 0 ]]; then
+    log_info "Total videos to summarize: $unsummarized_video_count"
+
+    if [[ "$unsummarized_video_count" -eq 0 ]]; then
         log_info "No new videos to process"
         echo ""
         echo "=========================================="
-        echo "📺 YouTube Monitor - No New Videos"
+        echo "📺 YouTube Monitor - All Caught Up"
         echo "=========================================="
-        echo "Checked ${#channels[@]} channels, no new videos found."
+        echo "Checked ${#channels[@]} channels, all videos already summarized."
         echo "Last check: $(date '+%Y-%m-%d %H:%M:%S UTC')"
         echo "=========================================="
         exit 0
     fi
 
     # Limit videos to process
-    if [[ "$new_video_count" -gt "$max_videos" ]]; then
-        log_info "Limiting to $max_videos videos (found $new_video_count)"
-        all_new_videos=$(echo "$all_new_videos" | jq ".[0:$max_videos]")
-        new_video_count=$max_videos
+    if [[ "$unsummarized_video_count" -gt "$max_videos" ]]; then
+        log_info "Limiting to $max_videos videos (found $unsummarized_video_count)"
+        all_unsummarized_videos=$(echo "$all_unsummarized_videos" | jq ".[0:$max_videos]")
+        unsummarized_video_count=$max_videos
     fi
 
-    # Process each new video
+    # Process each unsummarized video
     echo ""
     echo "=========================================="
-    echo "📺 Processing $new_video_count new video(s)"
+    if [[ "$fetch_only_mode" == "true" ]]; then
+        echo "📥 Fetching $unsummarized_video_count transcript(s)"
+    else
+        echo "📺 Processing $unsummarized_video_count video(s)"
+    fi
     echo "=========================================="
     echo ""
 
-    for ((i = 0; i < new_video_count; i++)); do
+    for ((i = 0; i < unsummarized_video_count; i++)); do
         local video_data
-        video_data=$(echo "$all_new_videos" | jq ".[$i]")
+        video_data=$(echo "$all_unsummarized_videos" | jq ".[$i]")
 
         local video_id
         video_id=$(echo "$video_data" | jq -r '.video_id')
-        local channel_id
-        channel_id=$(echo "$video_data" | jq -r '.channel_id')
         local title
         title=$(echo "$video_data" | jq -r '.title')
 
-        # Check if already summarized
-        if is_summarized "$video_id"; then
-            log_info "Video $video_id already summarized, skipping"
-            add_seen_video "$video_id" "$title" "$channel_id"
-            continue
+        if [[ "$fetch_only_mode" == "true" ]]; then
+            log_info "Fetching transcript: $title ($video_id)"
+            if fetch_transcript_only "$video_data"; then
+                ((total_fetched++)) || true
+            fi
+        else
+            log_info "Summarizing: $title ($video_id)"
+            if process_video "$video_data"; then
+                ((total_summarized++)) || true
+            else
+                log_warn "Failed to summarize $video_id - will retry on next run"
+            fi
         fi
-
-        if process_video "$video_data"; then
-            ((total_summarized++)) || true
-        fi
-
-        # Always mark as seen after processing attempt
-        add_seen_video "$video_id" "$title" "$channel_id"
     done
 
     # Summary
     log_info "=========================================="
-    log_info "Run complete: $total_new new, $total_summarized summarized"
+    if [[ "$fetch_only_mode" == "true" ]]; then
+        log_info "Run complete: $total_new new, $total_fetched transcripts cached"
+    else
+        log_info "Run complete: $total_new new, $total_summarized summarized"
+    fi
     log_info "=========================================="
 
     echo ""
     echo "=========================================="
     echo "📊 Summary"
     echo "=========================================="
-    echo "New videos found: $total_new"
-    echo "Summaries generated: $total_summarized"
+    if [[ "$fetch_only_mode" == "true" ]]; then
+        echo "Transcripts cached: $total_fetched"
+    else
+        echo "New videos found: $total_new"
+        echo "Summaries generated: $total_summarized"
+    fi
     echo "Completed at: $(date '+%Y-%m-%d %H:%M:%S UTC')"
     echo "=========================================="
 }

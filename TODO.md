@@ -11,6 +11,8 @@
   - [x] GLM_MODEL setting
   - [x] MAX_VIDEOS_PER_RUN setting
   - [x] Directory paths (TRANSCRIPT_CACHE_DIR, STATE_DIR, LOG_DIR)
+  - [x] Proxy configuration settings
+  - [x] YouTube API key placeholder
 - [x] Create `channels.txt` template file
   - [x] Include instructions/comments
   - [x] Add example channel IDs
@@ -25,6 +27,7 @@
   - [x] Python dependencies install command
   - [x] Configuration steps
   - [x] Usage examples
+  - [x] Proxy configuration guide
 
 ## Phase 2: RSS Feed Monitor ✅ COMPLETED
 
@@ -91,10 +94,11 @@
   - [x] Load from `config.env` or environment
   - [x] Validate GLM_API_KEY
 - [x] Add transcript fetching function
-  - [x] Install/import `youtube_transcript_api`
-  - [x] `get_transcript(video_id)` function
-  - [x] Handle multiple languages (prefer English)
-  - [x] Fallback to auto-generated if manual not available
+  - [x] Install/import `yt-dlp` for transcript download
+  - [x] `get_transcript_ytdlp(video_id)` function
+  - [x] VTT file parsing with deduplication
+  - [x] Filter out short segments (< 0.3s) to remove duplicates
+  - [x] Handle missing/unavailable transcripts
 - [x] Add transcript formatting
   - [x] Convert segments to readable format
   - [x] Include timestamps
@@ -104,6 +108,7 @@
   - [x] Private video
   - [x] Geoblocked content
   - [x] Network errors
+  - [x] RequestBlocked errors (cloud IP blocking)
 - [x] Add CLI interface
   - [x] Accept video_id as argument
   - [x] Output summary to stdout
@@ -115,7 +120,7 @@
 - [x] Add GLM client setup
   - [x] Install/import `zhipuai` package
   - [x] Initialize client with API key
-  - [x] Configure model (glm-4-flash, glm-4, glm-4-plus)
+  - [x] Configure model (glm-4-flash, glm-4, glm-4-plus, glm-4.7)
 - [x] Create prompt template
   - [x] Load prompt template from constant
   - [x] Format transcript data for prompt
@@ -182,7 +187,40 @@
   - [x] Verify API key is set
   - [x] Verify channels.txt has entries
 
-## Testing & Polish ⚠️ PENDING USER TESTING
+## Phase 8: Cloud IP Bypass ✅ COMPLETED
+
+- [x] Implement supadata.ai API integration (PRIMARY METHOD)
+  - [x] Add `get_transcript_supadata()` function to `summarize.py`
+  - [x] API key authentication via x-api-key header
+  - [x] User-Agent header for Cloudflare bypass
+  - [x] Millisecond to second timestamp conversion
+  - [x] Async job polling support
+  - [x] Configuration in config.env (SUPADATA_API_KEY, USE_SUPADATA)
+- [x] Update get_transcript() function
+  - [x] Try supadata.ai first
+  - [x] Fall back to yt-dlp on failure
+- [x] Implement yt-dlp with browser cookies (FALLBACK)
+  - [x] Add yt-dlp integration to `summarize.py`
+  - [x] Add Node.js runtime for n-challenge solving
+  - [x] Parse VTT subtitle format
+  - [x] Configuration in config.env
+- [x] Fix transcript deduplication issue
+  - [x] Parse both start and end times from VTT
+  - [x] Filter out short segments (< 0.3s)
+  - [x] Eliminate duplicate text from progressive captioning
+- [x] Update documentation
+  - [x] README with yt-dlp and supadata.ai setup instructions
+  - [x] SPEC.md updated with supadata.ai details
+- [x] Remove YouTube API/OAuth dependency
+  - [x] Removed setup_youtube_oauth.py script
+  - [x] Removed OAuth code from summarize.py
+  - [x] supadata.ai is now the primary method, yt-dlp fallback
+  - [x] Updated .gitignore for OAuth files
+- [x] Remove youtube-transcript-api dependency
+  - [x] Removed imports and fallback code
+  - [x] Updated documentation (README, pip install)
+
+## Testing & Polish ⚠️ PENDING
 
 - [ ] Manual testing
   - [ ] Test with real channel (has new videos)
@@ -190,6 +228,7 @@
   - [ ] Test with video without transcript
   - [ ] Test state persistence (run twice)
   - [ ] Test error conditions (bad API key, etc.)
+  - [ ] Test proxy functionality
 - [x] Add debug mode
   - [x] `--debug` flag
   - [x] Verbose logging
@@ -205,13 +244,24 @@
   - [x] Update README with actual usage
   - [x] Add troubleshooting section
   - [x] Add example output
+  - [x] Document proxy setup
 
-## Future Enhancements (Out of Scope)
+## Known Issues
 
-- [ ] Support for YouTube Data API (for community posts, etc.)
-- [ ] Multi-language transcript support
-- [ ] Chunking for very long transcripts
-- [ ] Summarization in parallel (multiple videos at once)
-- [ ] Web dashboard
-- [ ] Configurable output formats (JSON, markdown, etc.)
-- [ ] Notification integrations (built-in Telegram, email)
+| Issue | Priority | Status |
+|-------|----------|--------|
+| Supadata.ai rate limits | LOW | ⚠️ Falls back to yt-dlp automatically |
+| Cookies may expire periodically | LOW | ⚠️ Re-export cookies when yt-dlp fails |
+| Node.js required for n-challenge | LOW | ✅ Documented in setup |
+
+## Next Steps
+
+1. **Maintenance:** Monitor API usage
+   - Check supadata.ai credit balance periodically
+   - Re-export browser cookies when needed (fallback)
+
+2. **Optional Enhancements:**
+   - Automatic cookie refresh (if using browser integration)
+   - Fallback to proxy if cookies fail
+   - Monitoring/alerting for API failures
+   - Supadata.ai usage statistics tracking

@@ -10,7 +10,9 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -20,13 +22,6 @@ try:
 except ImportError:
     print("Error: zhipuai package not installed", file=sys.stderr)
     print("Install with: pip3 install zhipuai", file=sys.stderr)
-    sys.exit(1)
-
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, VideoUnavailable, RequestBlocked
-except ImportError:
-    print("Error: youtube-transcript-api not installed", file=sys.stderr)
-    print("Install with: pip3 install youtube-transcript-api", file=sys.stderr)
     sys.exit(1)
 
 
@@ -105,57 +100,394 @@ def clean_text(text: str) -> str:
     return text
 
 
-def get_transcript(video_id: str) -> Tuple[Optional[List[Dict]], Optional[str]]:
+def parse_vtt_file(vtt_path: str) -> List[Dict]:
+    """Parse VTT subtitle file into segments, filtering out short intermediate captions."""
+    segments = []
+
+    with open(vtt_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # Parse VTT format
+    lines = content.split('\n')
+    i = 0
+
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Look for timestamp pattern: 00:00:00.000 --> 00:00:02.500
+        if '-->' in line:
+            # Parse both start and end times
+            time_pattern = r'(\d+):(\d+):(\d+)\.(\d+)\s*-->\s*(\d+):(\d+):(\d+)\.(\d+)'
+            time_match = re.search(time_pattern, line)
+            if time_match:
+                h1, m1, s1, ms1, h2, m2, s2, ms2 = map(int, time_match.groups())
+                start = h1 * 3600 + m1 * 60 + s1 + ms1 / 1000
+                end = h2 * 3600 + m2 * 60 + s2 + ms2 / 1000
+                duration = end - start
+
+                # Get text (next non-empty lines)
+                i += 1
+                text_lines = []
+                while i < len(lines) and lines[i].strip() and '-->' not in lines[i]:
+                    # Remove VTT formatting tags
+                    text = re.sub(r'<[^>]+>', '', lines[i].strip())
+                    # Remove positioning tags like {\an8}
+                    text = re.sub(r'\{[^}]+\}', '', text)
+                    # Remove common artifacts
+                    text = re.sub(r'\[(Music|Applause|Laughter|Silence)\]', '', text)
+                    if text:
+                        text_lines.append(text)
+                    i += 1
+
+                if text_lines:
+                    # Filter out very short segments (< 0.3s) - these are intermediate display states
+                    if duration >= 0.3:
+                        segments.append({
+                            'text': ' '.join(text_lines),
+                            'start': start,
+                            'duration': duration
+                        })
+
+        i += 1
+
+    return segments
+
+
+def get_transcript_supadata(video_id: str, config: Dict = None) -> Tuple[Optional[List[Dict]], Optional[str]]:
     """
-    Download transcript for a YouTube video.
+    Download transcript using supadata.ai API.
+
+    Args:
+        video_id: YouTube video ID
+        config: Configuration dictionary
 
     Returns:
         Tuple of (transcript_segments, language_code)
         Returns (None, None) if transcript not available
     """
+    import urllib.request
+    import urllib.error
+
+    api_key = config.get('SUPADATA_API_KEY', '') if config else ''
+    if not api_key:
+        api_key = os.environ.get('SUPADATA_API_KEY', '')
+
+    if not api_key:
+        print("[supadata] No SUPADATA_API_KEY configured", file=sys.stderr)
+        return None, None
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    api_url = "https://api.supadata.ai/v1/transcript"
+
+    # Build request with URL parameter
     try:
-        # Create API instance and list transcripts
-        api = YouTubeTranscriptApi()
-        transcript_list = api.list(video_id)
+        import urllib.parse
+        params = urllib.parse.urlencode({'url': url, 'text': 'false', 'mode': 'native'})
+        full_url = f"{api_url}?{params}"
 
-        # Try to find English transcript first
-        try:
-            transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
-            return transcript.fetch(), 'en'
-        except NoTranscriptFound:
-            pass
+        req = urllib.request.Request(full_url)
+        req.add_header('x-api-key', api_key)
+        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
 
-        # Fall back to any manually created transcript
+        print(f"[supadata] Fetching transcript for video {video_id}", file=sys.stderr)
+
+        with urllib.request.urlopen(req, timeout=60) as response:
+            data = json.loads(response.read().decode('utf-8'))
+
+            # Check for async response (job ID)
+            if 'jobId' in data:
+                job_id = data['jobId']
+                print(f"[supadata] Async job started: {job_id}, polling...", file=sys.stderr)
+
+                # Poll for completion
+                max_polls = 30
+                poll_interval = 2
+                for i in range(max_polls):
+                    time.sleep(poll_interval)
+                    status_url = f"{api_url.replace('/transcript', '')}/web/crawl/{job_id}"
+                    req = urllib.request.Request(status_url)
+                    req.add_header('x-api-key', api_key)
+
+                    with urllib.request.urlopen(req, timeout=30) as status_response:
+                        status_data = json.loads(status_response.read().decode('utf-8'))
+                        status = status_data.get('status', '')
+
+                        if status == 'completed':
+                            data = status_data
+                            break
+                        elif status == 'failed':
+                            print(f"[supadata] Job failed: {status_data}", file=sys.stderr)
+                            return None, None
+
+                if 'content' not in data:
+                    print(f"[supadata] Job timeout or incomplete", file=sys.stderr)
+                    return None, None
+
+            # Parse response
+            if 'content' not in data:
+                print(f"[supadata] No content in response", file=sys.stderr)
+                return None, None
+
+            content = data['content']
+            lang = data.get('lang', 'en')
+
+            # Convert supadata format to internal format
+            # supadata: offset (ms), duration (ms)
+            # internal: start (seconds), duration (seconds)
+            segments = []
+            for item in content:
+                segments.append({
+                    'text': item.get('text', ''),
+                    'start': item.get('offset', 0) / 1000,  # Convert ms to seconds
+                    'duration': item.get('duration', 0) / 1000  # Convert ms to seconds
+                })
+
+            if segments:
+                print(f"[supadata] Got transcript with {len(segments)} segments (lang: {lang})", file=sys.stderr)
+                return segments, lang
+
+            return None, None
+
+    except urllib.error.HTTPError as e:
+        # Read error response body for more details
+        error_body = ""
         try:
-            for transcript in transcript_list:
-                if not transcript.is_generated:
-                    return transcript.fetch(), transcript.language_code
+            if e.fp:
+                error_body = e.fp.read().decode('utf-8')
         except:
             pass
 
-        # Fall back to auto-generated transcript
-        try:
-            transcript = transcript_list.find_generated_transcript(['en', 'en-US', 'en-GB'])
-            return transcript.fetch(), 'en'
-        except:
-            pass
-
-        # Try any available transcript
-        for transcript in transcript_list:
-            return transcript.fetch(), transcript.language_code
-
+        if e.code == 401:
+            print(f"[supadata] Authentication failed. Check your API key.", file=sys.stderr)
+        elif e.code == 429:
+            print(f"[supadata] Rate limit exceeded.", file=sys.stderr)
+        elif e.code == 404:
+            print(f"[supodata] Transcript not found for video {video_id}", file=sys.stderr)
+        else:
+            print(f"[supadata] HTTP error: {e.code} - {e.reason}", file=sys.stderr)
+            if error_body:
+                print(f"[supadata] Error response: {error_body[:500]}", file=sys.stderr)
         return None, None
-
-    except RequestBlocked as e:
-        print(f"Warning: YouTube is blocking requests from this IP for video {video_id}", file=sys.stderr)
-        print("This is common when running from cloud servers. Consider using a proxy.", file=sys.stderr)
-        return None, None
-    except (VideoUnavailable, TranscriptsDisabled) as e:
-        print(f"Warning: Transcript not available for video {video_id}: {e}", file=sys.stderr)
+    except urllib.error.URLError as e:
+        print(f"[supadata] Network error: {e.reason}", file=sys.stderr)
         return None, None
     except Exception as e:
-        print(f"Warning: Error fetching transcript: {e}", file=sys.stderr)
+        print(f"[supadata] Error: {e}", file=sys.stderr)
         return None, None
+
+
+def get_transcript_ytdlp(video_id: str, config: Dict = None) -> Tuple[Optional[List[Dict]], Optional[str]]:
+    """
+    Download transcript using yt-dlp with browser cookies.
+
+    Args:
+        video_id: YouTube video ID
+        config: Configuration dictionary
+
+    Returns:
+        Tuple of (transcript_segments, language_code)
+        Returns (None, None) if transcript not available
+    """
+    cookies_file = config.get('YOUTUBE_COOKIES_FILE', '') if config else ''
+    use_browser_cookies = config.get('USE_BROWSER_COOKIES', 'false').lower() == 'true' if config else False
+
+    if not cookies_file and not use_browser_cookies:
+        return None, None
+
+    # Check if yt-dlp is available
+    try:
+        subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("[yt-dlp] yt-dlp not found. Install with: pip3 install yt-dlp", file=sys.stderr)
+        return None, None
+
+    # Build yt-dlp command - use subs-only mode with JS challenge solver
+    node_path = '/root/.nvm/versions/node/v24.13.0/bin/node'
+    cmd = [
+        'yt-dlp',
+        '--js-runtimes', f'node:{node_path}',
+        '--remote-components', 'ejs:github',
+        '--write-auto-subs',
+        '--sub-langs', 'en',
+        '--sub-format', 'vtt',
+        '--no-warnings'
+    ]
+
+    # Add cookies
+    if cookies_file and os.path.exists(cookies_file):
+        cmd.extend(['--cookies', cookies_file])
+        print(f"[yt-dlp] Using cookies file: {cookies_file}", file=sys.stderr)
+    elif use_browser_cookies:
+        browser = config.get('BROWSER_TYPE', 'chrome') if config else 'chrome'
+        cmd.extend(['--cookies-from-browser', browser])
+        print(f"[yt-dlp] Using cookies from browser: {browser}", file=sys.stderr)
+    else:
+        print("[yt-dlp] No cookies configured", file=sys.stderr)
+        return None, None
+
+    # Output to temp file (use .vtt extension to ensure proper naming)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        output_path = os.path.join(temp_dir, 'subtitles')
+        cmd.extend(['-o', output_path, f'https://www.youtube.com/watch?v={video_id}'])
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+            # Check for errors in stderr
+            if result.stderr and 'WARNING: video has no subtitles' in result.stderr:
+                print(f"[yt-dlp] No subtitles available for video {video_id}", file=sys.stderr)
+                return None, None
+
+            # Find downloaded subtitle file (look for any .vtt file)
+            vtt_files = []
+            for file in os.listdir(temp_dir):
+                if file.endswith('.vtt') or file.endswith('.en.vtt'):
+                    vtt_files.append(os.path.join(temp_dir, file))
+
+            # Also check if yt-dlp wrote to the exact output path
+            if os.path.exists(output_path + '.en.vtt'):
+                vtt_files.append(output_path + '.en.vtt')
+            elif os.path.exists(output_path + '.vtt'):
+                vtt_files.append(output_path + '.vtt')
+
+            if not vtt_files:
+                print(f"[yt-dlp] No subtitle file downloaded for video {video_id}", file=sys.stderr)
+                if result.stderr:
+                    print(f"[yt-dlp] stderr: {result.stderr[:500]}", file=sys.stderr)
+                return None, None
+
+            # Use the first VTT file found
+            vtt_path = vtt_files[0]
+            segments = parse_vtt_file(vtt_path)
+
+            if segments:
+                print(f"[yt-dlp] Got transcript with {len(segments)} segments", file=sys.stderr)
+                return segments, 'en'
+
+            return None, None
+
+        except subprocess.TimeoutExpired:
+            print(f"[yt-dlp] Timeout fetching transcript for video {video_id}", file=sys.stderr)
+            return None, None
+        except Exception as e:
+            print(f"[yt-dlp] Error: {e}", file=sys.stderr)
+            return None, None
+
+
+def get_cached_transcript(video_id: str, config: Dict = None) -> Optional[Tuple[List[Dict], str]]:
+    """
+    Check if transcript is cached on disk.
+
+    Args:
+        video_id: YouTube video ID
+        config: Configuration dictionary
+
+    Returns:
+        Tuple of (segments, language) if cached, None otherwise
+    """
+    cache_dir = config.get('TRANSCRIPT_CACHE_DIR', './transcripts') if config else './transcripts'
+    cache_file = os.path.join(cache_dir, f"{video_id}.json")
+
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'r') as f:
+                cached = json.load(f)
+            print(f"[Cache] Using cached transcript for {video_id}", file=sys.stderr)
+            return cached['segments'], cached.get('language', 'en')
+        except Exception as e:
+            print(f"[Cache] Error reading cache: {e}", file=sys.stderr)
+    return None
+
+
+def save_transcript_cache(video_id: str, segments: List[Dict], language: str, config: Dict = None, metadata: Dict = None) -> bool:
+    """
+    Save transcript to disk cache.
+
+    Args:
+        video_id: YouTube video ID
+        segments: Transcript segments
+        language: Language code
+        config: Configuration dictionary
+        metadata: Optional dict with video info (title, channel, url, published, duration)
+
+    Returns:
+        True if saved successfully, False otherwise
+    """
+    cache_dir = config.get('TRANSCRIPT_CACHE_DIR', './transcripts') if config else './transcripts'
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, f"{video_id}.json")
+
+    try:
+        cache_data = {
+            'video_id': video_id,
+            'language': language,
+            'segments': segments,
+            'cached_at': datetime.now(timezone.utc).isoformat()
+        }
+
+        # Add metadata if provided
+        if metadata:
+            if 'title' in metadata and metadata['title']:
+                cache_data['title'] = metadata['title']
+            if 'channel_name' in metadata and metadata['channel_name']:
+                cache_data['channel_name'] = metadata['channel_name']
+            if 'url' in metadata and metadata['url']:
+                cache_data['url'] = metadata['url']
+            if 'published' in metadata and metadata['published']:
+                cache_data['published'] = metadata['published']
+            if 'duration' in metadata and metadata['duration']:
+                cache_data['duration'] = metadata['duration']
+
+        with open(cache_file, 'w') as f:
+            json.dump(cache_data, f, indent=2)
+        print(f"[Cache] Saved transcript to {cache_file}", file=sys.stderr)
+        return True
+    except Exception as e:
+        print(f"[Cache] Error saving transcript: {e}", file=sys.stderr)
+        return False
+
+
+def get_transcript(video_id: str, config: Dict = None, use_cache: bool = True, metadata: Dict = None) -> Tuple[Optional[List[Dict]], Optional[str]]:
+    """
+    Download transcript for a YouTube video.
+
+    Tries supadata.ai API first, then falls back to yt-dlp.
+
+    Args:
+        video_id: YouTube video ID
+        config: Configuration dictionary (optional)
+        use_cache: Whether to check/use cache (default: True)
+
+    Returns:
+        Tuple of (transcript_segments, language_code)
+        Returns (None, None) if transcript not available
+    """
+    # Check cache first
+    if use_cache:
+        cached = get_cached_transcript(video_id, config)
+        if cached:
+            return cached
+
+    segments, lang = None, None
+
+    # Try supadata.ai API first (if API key is configured)
+    use_supadata = config.get('USE_SUPADATA', 'true').lower() == 'true' if config else True
+    if use_supadata:
+        print("[Transcript] Trying supadata.ai...", file=sys.stderr)
+        segments, lang = get_transcript_supadata(video_id, config)
+
+    # Fall back to yt-dlp with cookies
+    if not segments:
+        use_ytdlp = config.get('USE_YTDLP', 'true').lower() == 'true' if config else True
+        if use_ytdlp:
+            print("[Transcript] Trying yt-dlp...", file=sys.stderr)
+            segments, lang = get_transcript_ytdlp(video_id, config)
+
+    # Save to cache if we got a transcript
+    if segments and lang:
+        save_transcript_cache(video_id, segments, lang, config, metadata)
+
+    return segments, lang
 
 
 def format_transcript_for_prompt(segments: List[Dict], max_length: int = 50000) -> str:
@@ -329,6 +661,63 @@ def format_output(summary: str, video_info: Dict) -> str:
     return '\n'.join(output)
 
 
+def send_to_telegram(message: str, config: Dict = None) -> bool:
+    """Send message to Telegram bot."""
+    use_telegram = config.get('USE_TELEGRAM', 'false').lower() == 'true' if config else False
+    if not use_telegram:
+        return False
+
+    bot_token = config.get('TELEGRAM_BOT_TOKEN', '') if config else ''
+    chat_id = config.get('TELEGRAM_CHAT_ID', '') if config else ''
+
+    if not bot_token or not chat_id:
+        print("[Telegram] TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not configured", file=sys.stderr)
+        return False
+
+    try:
+        import urllib.request
+        import urllib.parse
+
+        max_length = 4096
+        messages = []
+        if len(message) <= max_length:
+            messages.append(message)
+        else:
+            paragraphs = message.split('\n\n')
+            current = ""
+            for para in paragraphs:
+                if len(current) + len(para) + 2 <= max_length:
+                    current += para + "\n\n"
+                else:
+                    if current:
+                        messages.append(current.strip())
+                    current = para + "\n\n"
+            if current:
+                messages.append(current.strip())
+
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        for msg in messages:
+            data = urllib.parse.urlencode({
+                'chat_id': chat_id,
+                'text': msg,
+                'parse_mode': 'HTML'
+            }).encode('utf-8')
+
+            req = urllib.request.Request(url, data=data, method='POST')
+            with urllib.request.urlopen(req, timeout=30) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                if not result.get('ok'):
+                    print(f"[Telegram] Error: {result}", file=sys.stderr)
+                    return False
+
+        print(f"[Telegram] Sent {len(messages)} message(s)", file=sys.stderr)
+        return True
+
+    except Exception as e:
+        print(f"[Telegram] Error sending message: {e}", file=sys.stderr)
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Download YouTube video transcript and generate AI summary using GLM'
@@ -340,6 +729,8 @@ def main():
     parser.add_argument('--published', default='', help='Publication date')
     parser.add_argument('--force', action='store_true', help='Force re-processing even if already summarized')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
+    parser.add_argument('--fetch-only', action='store_true', help='Only fetch and cache transcript, skip summarization')
+    parser.add_argument('--summarize-only', action='store_true', help='Only summarize using cached transcript (skip fetch)')
 
     args = parser.parse_args()
 
@@ -363,24 +754,80 @@ def main():
             try:
                 with open(summarized_file, 'r') as f:
                     summarized = json.load(f)
-                    if args.video_id in summarized:
+                    if args.video_id in summarized and not args.summarize_only:
                         print(f"Video {args.video_id} already summarized. Use --force to re-process.", file=sys.stderr)
                         sys.exit(0)
             except:
                 pass
 
-    # Download transcript
-    if args.debug:
-        print(f"Fetching transcript for video: {args.video_id}", file=sys.stderr)
+    # Fetch-only mode: just get and cache the transcript
+    if args.fetch_only:
+        print(f"[Fetch-only] Getting transcript for {args.video_id}", file=sys.stderr)
 
-    segments, lang = get_transcript(args.video_id)
+        # Build metadata dict from args
+        metadata = {
+            'title': args.title,
+            'channel_name': args.channel,
+            'url': args.url,
+            'published': args.published
+        }
 
-    if not segments:
-        print(f"Error: No transcript available for video {args.video_id}", file=sys.stderr)
-        sys.exit(1)
+        segments, lang = get_transcript(args.video_id, config, use_cache=False, metadata=metadata)
 
-    if args.debug:
-        print(f"Got transcript with {len(segments)} segments (language: {lang})", file=sys.stderr)
+        if not segments:
+            print(f"Error: No transcript available for video {args.video_id}", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"[Fetch-only] Successfully cached {len(segments)} segments", file=sys.stderr)
+        print(f"[Fetch-only] Cached to: {config.get('TRANSCRIPT_CACHE_DIR', './transcripts')}/{args.video_id}.json")
+        return 0
+
+    # Summarize-only mode: use cached transcript
+    if args.summarize_only:
+        print(f"[Summarize-only] Using cached transcript for {args.video_id}", file=sys.stderr)
+
+        # Load cached data to get metadata
+        cache_dir = config.get('TRANSCRIPT_CACHE_DIR', './transcripts')
+        cache_file = os.path.join(cache_dir, f"{args.video_id}.json")
+        cached_data = None
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r') as f:
+                    cached_data = json.load(f)
+            except Exception as e:
+                print(f"[Summarize-only] Error loading cache: {e}", file=sys.stderr)
+
+        if not cached_data:
+            print(f"Error: No cached transcript found for {args.video_id}", file=sys.stderr)
+            sys.exit(1)
+
+        segments = cached_data.get('segments', [])
+        lang = cached_data.get('language', 'en')
+
+        # Update video_info from cached metadata if available
+        if 'title' in cached_data:
+            video_info['title'] = cached_data['title']
+        if 'channel_name' in cached_data:
+            video_info['channel_name'] = cached_data['channel_name']
+        if 'url' in cached_data:
+            video_info['url'] = cached_data['url']
+        if 'published' in cached_data:
+            video_info['published'] = cached_data['published']
+
+        print(f"[Summarize-only] Loaded {len(segments)} segments from cache", file=sys.stderr)
+    else:
+        # Normal mode: fetch transcript (with cache enabled)
+        if args.debug:
+            print(f"Fetching transcript for video: {args.video_id}", file=sys.stderr)
+
+        segments, lang = get_transcript(args.video_id, config)
+
+        if not segments:
+            print(f"Error: No transcript available for video {args.video_id}", file=sys.stderr)
+            sys.exit(1)
+
+        if args.debug:
+            print(f"Got transcript with {len(segments)} segments (language: {lang})", file=sys.stderr)
 
     # Format transcript
     transcript_text = format_transcript_for_prompt(segments)
@@ -399,6 +846,10 @@ def main():
     # Format and print output
     output = format_output(summary, video_info)
     print(output)
+
+    # Send to Telegram if enabled
+    if config:
+        send_to_telegram(output, config)
 
     return 0
 

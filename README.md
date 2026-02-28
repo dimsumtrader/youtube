@@ -5,7 +5,8 @@ An automated system that monitors YouTube channels for new videos, downloads the
 ## Features
 
 - **Automatic Monitoring**: Checks YouTube channels for new content via RSS feeds
-- **Transcript Download**: Fetches video transcripts using `youtube-transcript-api`
+- **Transcript Download**: Fetches video transcripts using supadata.ai API or yt-dlp with cookies
+- **No Bot Detection**: supadata.ai and yt-dlp with browser cookies bypass YouTube's bot detection
 - **AI Summarization**: Generates detailed summaries with timestamps using GLM-4
 - **State Tracking**: Only processes each video once - tracks seen and summarized videos
 - **Formatted Output**: Beautiful text output suitable for terminal reading or piping to other tools
@@ -75,7 +76,7 @@ sudo dnf install curl jq python3-pip
 
 ### Install Python Dependencies
 ```bash
-pip3 install youtube-transcript-api zhipuai
+pip3 install zhipuai yt-dlp
 ```
 
 ## Setup
@@ -161,6 +162,49 @@ Edit `config.env` to customize:
 | `glm-4-plus` | More capable model |
 | `glm-4-air` | Balanced model |
 
+### yt-dlp with Browser Cookies (Recommended)
+
+The most reliable way to fetch transcripts - uses real browser authentication cookies to bypass bot detection.
+
+**Cookie Export (One-Time Setup):**
+
+1. Install a browser extension to export cookies:
+   - **Chrome/Edge**: [Get cookies.txt LOCALLY](https://chrome.google.com/webstore/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbdanldgppc)
+   - **Firefox**: [Get cookies.txt](https://addons.mozilla.org/en-US/firefox/addon/get-cookiestxt/)
+
+2. Go to [youtube.com](https://youtube.com) and make sure you're logged in
+
+3. Click the extension icon, then click "Export" and save the file as `youtube_cookies.txt`
+
+4. Upload the file to your server:
+   ```bash
+   scp youtube_cookies.txt user@server:/root/youtube/
+   ```
+
+**Configure:**
+
+```bash
+# Edit config.env - the path to your cookies file
+YOUTUBE_COOKIES_FILE="/root/youtube/youtube_cookies.txt"
+USE_YTDLP="true"
+```
+
+**Alternative: Use Browser Directly**
+
+If running on a machine with a browser (e.g., your local machine), yt-dlp can read cookies directly:
+
+```bash
+# Edit config.env
+USE_BROWSER_COOKIES="true"
+BROWSER_TYPE="chrome"  # or firefox, edge, safari, brave, opera
+```
+
+**Maintenance:**
+
+- Cookies expire periodically (every few weeks)
+- When cookies expire, simply re-export and replace the file
+- You can automate cookie refresh with a scheduled task if needed
+
 ## Project Structure
 
 ```
@@ -183,6 +227,17 @@ Edit `config.env` to customize:
 - Some videos don't have transcripts enabled
 - Livestreams often don't have transcripts
 - Private/members-only videos can't be accessed
+- Supadata.ai or yt-dlp may have temporary issues
+
+### Supadata.ai errors
+- Check your API key is valid from https://dash.supadata.ai/
+- Verify you have available credits
+- Check for rate limiting (consider upgrading your plan)
+
+### yt-dlp errors
+- Cookies may have expired - re-export from your browser
+- Node.js may not be installed (required for YouTube's n-challenge)
+- Check yt-dlp is up to date: `pip3 install --upgrade yt-dlp`
 
 ### GLM API errors
 - Verify your API key is valid from https://open.bigmodel.cn/

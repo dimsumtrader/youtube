@@ -27,3 +27,19 @@ build/
 venv/
 env/
 ENV/
+
+# Sensitive credentials
+client_secret_*.json
+youtube_cookies.txt
+*.cookies.txt
+
+# Test/working transcript files (not in cache dir)
+transcript_*.json
+transcript_*.txt
+
+# Claude Code memory
+.claude/
+
+# OAuth tokens (outside of state/)
+*_oauth_token.json
+*.token.json
