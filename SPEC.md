@@ -23,13 +23,13 @@ An automated system that monitors YouTube channels for new videos, downloads the
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │   Cron      │────▶│   Bash      │────▶│   Python    │────▶│    GLM      │────▶│  Telegram   │
 │  Scheduler  │     │   Monitor   │     │  Summarizer │     │    API      │     │     Bot     │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-                           │                    │                    │
-                           ▼                    ▼                    ▼
-                    ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-                    │   State     │     │   yt-dlp    │     │  supadata   │
-                    │   Files     │     │  (videos)   │     │    API      │
-                    └─────────────┘     └─────────────┘     └─────────────┘
+│ (Noon HKT)  │     └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+└─────────────┘            │                    │                    │
+                            ▼                    ▼                    ▼
+                     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+                     │   State     │     │   yt-dlp    │     │  supadata   │
+                     │   Files     │     │  (videos)   │     │    API      │
+                     └─────────────┘     └─────────────┘     └─────────────┘
 ```
 
 ## Components
@@ -75,7 +75,7 @@ Tracks all videos that have been processed. Videos in this file are skipped on s
     "title": "Video Title",
     "channel_id": "UCxxx",
     "channel_name": "Channel Name",
-    "processed_at": "2026-02-28T12:00:00Z",
+    "processed_at": "2026-03-04T12:00:00Z",
     "duration": 2920,
     "view_count": 25000
   }
@@ -95,7 +95,7 @@ This pre-populates the last ~50 videos from a channel into `seen_videos.json`, s
 
 ### Monitor Flow
 1. **Discovery** - Fetch latest ~50 videos per channel using yt-dlp
-2. **Filter** - Skip videos already in `seen_videos.json` and Shorts (< 60s)
+2. **Filter** - Skip videos already in `seen_videos.json` and Shorts (< 300s / 5 min)
 3. **Process** - For each new video:
    - Download transcript (supadata.ai primary, yt-dlp fallback)
    - Generate AI summary via GLM
@@ -114,23 +114,23 @@ Video: "Why the Self-Help Industry Is Built on Lies"
 URL: https://youtube.com/watch?v=abc123
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ Key Takeaways
+<b>✅ Key Takeaways</b>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • Insight 1
 • Insight 2
 ...
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⏱️ Detailed Summary with Timestamps
+<b>⏱️ Detailed Summary with Timestamps</b>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[00:00 - 03:30] Introduction
+<i>00:00 - 03:30</i> Introduction
 Summary of the introduction...
 
 ...
 
 ========================================
-Processed: February 28, 2026 @ 12:00 UTC
+Processed: March 4, 2026 @ 12:00 UTC
 ========================================
 ```
 
@@ -154,12 +154,12 @@ TELEGRAM_CHAT_ID="..."
 USE_TELEGRAM="true"
 
 # Processing
-MAX_VIDEOS_PER_RUN=3
+MAX_VIDEOS_PER_RUN=5
 API_CALL_DELAY=2
-MIN_VIDEO_LENGTH_SECONDS=60
-TRANSCRIPT_CACHE_DIR="./transcripts"
-STATE_DIR="./state"
-LOG_DIR="./logs"
+MIN_VIDEO_LENGTH_SECONDS=300
+TRANSCRIPT_CACHE_DIR="/root/youtube/transcripts"
+STATE_DIR="/root/youtube/state"
+LOG_DIR="/root/youtube/logs"
 ```
 
 `channels.txt`:
@@ -198,10 +198,21 @@ FETCH_ONLY=true ./youtube_monitor.sh
 
 ### Summarizing a Single Video
 ```bash
-./summarize.py abc123 \
+python3 summarize.py abc123 \
   --title "Video Title" \
   --channel "Channel Name" \
   --url "https://youtube.com/watch?v=abc123"
+```
+
+---
+
+## Automation
+
+### Cron Job
+The monitor runs automatically every day at **noon Hong Kong Time** (04:00 UTC):
+
+```bash
+0 4 * * * /root/youtube/youtube_monitor.sh >> /root/youtube/logs/monitor.log 2>&1
 ```
 
 ---
@@ -216,6 +227,7 @@ FETCH_ONLY=true ./youtube_monitor.sh
 | Missing config | Exit with error message |
 | State file corruption | Recreate from scratch |
 | Cookies expired | Fall back to supadata.ai |
+| Video ID starting with `-` | Fixed - uses `--` argument separator |
 
 ---
 
@@ -236,11 +248,11 @@ FETCH_ONLY=true ./youtube_monitor.sh
   "video_id": "abc123",
   "language": "en",
   "segments": [...],
-  "cached_at": "2026-02-28T12:00:00Z",
+  "cached_at": "2026-03-04T12:00:00Z",
   "title": "Video Title",
   "channel_name": "Channel Name",
   "url": "https://youtube.com/watch?v=abc123",
-  "published": "2026-02-27T10:00:00Z",
+  "published": "2026-03-03T10:00:00Z",
   "duration": 2920
 }
 ```
@@ -260,6 +272,8 @@ FETCH_ONLY=true ./youtube_monitor.sh
 - 1000x
 - MacroVoices
 
-**Videos Tracked:** ~874 (pre-populated, will be skipped)
+**Videos Tracked:** 874 (pre-populated, will be skipped)
+
+**Schedule:** Daily at noon Hong Kong Time (04:00 UTC)
 
 **Only NEW videos will be summarized going forward.**

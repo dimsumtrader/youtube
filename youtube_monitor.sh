@@ -16,7 +16,7 @@ SEEN_VIDEOS_FILE="${STATE_DIR}/seen_videos.json"
 SUMMARIZE_PY="${SCRIPT_DIR}/summarize.py"
 
 # Default values (can be overridden by config.env)
-MAX_VIDEOS_PER_RUN=${MAX_VIDEOS_PER_RUN:-3}
+MAX_VIDEOS_PER_RUN=${MAX_VIDEOS_PER_RUN:-5}
 API_CALL_DELAY=${API_CALL_DELAY:-2}
 MIN_VIDEO_LENGTH_SECONDS=${MIN_VIDEO_LENGTH_SECONDS:-60}
 
@@ -58,6 +58,12 @@ init_state() {
         echo "{}" > "$SEEN_VIDEOS_FILE"
         log_info "Created seen_videos.json"
     fi
+
+    # Fix if file is empty or corrupted
+    if [[ ! -s "$SEEN_VIDEOS_FILE" ]] || ! jq empty "$SEEN_VIDEOS_FILE" 2>/dev/null; then
+        echo "{}" > "$SEEN_VIDEOS_FILE"
+        log_info "Reset corrupted seen_videos.json"
+    fi
 }
 
 # Load state file
@@ -87,29 +93,30 @@ add_processed_video() {
     local timestamp
     timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
-    local jq_args="--arg vid $video_id --arg title $title --arg cid $channel_id --arg ts $timestamp"
-    local jq_obj='{"video_id": $vid, "title": $title, "channel_id": $cid, "processed_at": $ts'
+    # Build the new entry JSON
+    local new_entry='{"video_id": "'"$video_id"'", "title": '"$(jq -nrc --arg t "$title" '$t | @json')"', "channel_id": "'"$channel_id"'", "processed_at": "'"$timestamp"'"'
 
     if [[ -n "$channel_name" ]]; then
-        jq_args="$jq_args --arg cname $channel_name"
-        jq_obj="$jq_obj, \"channel_name\": \$cname"
+        new_entry="$new_entry, \"channel_name\": "$(jq -nrc --arg c "$channel_name" '$c | @json')""
     fi
 
     if [[ -n "$duration" ]]; then
-        jq_args="$jq_args --argjson duration $duration"
-        jq_obj="$jq_obj, \"duration\": \$duration"
+        new_entry="$new_entry, \"duration\": $duration"
     fi
 
     if [[ -n "$view_count" ]]; then
-        jq_args="$jq_args --argjson view_count $view_count"
-        jq_obj="$jq_obj, \"view_count\": \$view_count"
+        new_entry="$new_entry, \"view_count\": $view_count"
     fi
 
-    jq_obj="$jq_obj}"
+    new_entry="$new_entry}"
 
-    SEEN_VIDEOS=$(eval echo "$SEEN_VIDEOS" | jq $jq_args ". + {(\$vid): $jq_obj}")
+    # Create entry as JSON object: {"videoId": {...}}
+    local wrapped_entry='{"'"$video_id"'": '"$new_entry"'}'
 
-    # Atomic write
+    # Merge with SEEN_VIDEOS
+    SEEN_VIDEOS=$(echo "$SEEN_VIDEOS" | jq --argjson new "$wrapped_entry" '. + $new')
+
+    # Atomic write to state file
     local tmp_file
     tmp_file=$(mktemp)
     echo "$SEEN_VIDEOS" > "$tmp_file"
@@ -138,7 +145,7 @@ fetch_channel_videos() {
                 video_id: .id,
                 title: .title,
                 channel_id: $cid,
-                channel_name: (.channel // "Unknown"),
+                channel_name: (.playlist_channel // .playlist_uploader // "Unknown"),
                 url: "https://youtube.com/watch?v=\(.id)",
                 published: (if .upload_date and (.upload_date | length) >= 8 then "\(.upload_date[0:4])-\(.upload_date[4:6])-\(.upload_date[6:8])T00:00:00Z" else "" end),
                 duration: (.duration // 0),
@@ -171,11 +178,13 @@ process_video() {
     log_info "Processing video: $title ($video_id)"
 
     # Call summarize.py
-    if result=$(python3 "$SUMMARIZE_PY" "$video_id" \
+    # Use -- to signal end of options, then video_id (handles IDs starting with hyphen)
+    if result=$(python3 "$SUMMARIZE_PY" \
         --title "$title" \
         --channel "$channel_name" \
         --url "$url" \
-        --published "$published" 2>&1); then
+        --published "$published" \
+        -- "$video_id" 2>&1); then
 
         # Print summary to stdout
         echo "$result"

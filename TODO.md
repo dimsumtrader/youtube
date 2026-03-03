@@ -8,6 +8,7 @@
 - [x] Channel list (channels.txt)
 - [x] .gitignore (state and transcripts now tracked)
 - [x] README with setup instructions
+- [x] Cron job automation (daily at noon HKT)
 
 ### Core Components
 - [x] `youtube_monitor.sh` - Main orchestration script
@@ -25,7 +26,7 @@
 - [x] yt-dlp integration for video discovery
 - [x] Fetch ~50 videos per channel (actual ~100 due to yt-dlp behavior)
 - [x] Skip already processed videos
-- [x] Filter out Shorts (< 60 seconds)
+- [x] Filter out Shorts (< 300 seconds / 5 minutes)
 
 ### Transcript Download
 - [x] supadata.ai API integration (primary)
@@ -51,8 +52,12 @@
 - [x] Network timeouts
 - [x] Missing transcripts
 - [x] API rate limits
-- [x] Invalid video IDs
+- [x] Invalid video IDs (including hyphen-prefixed IDs)
 - [x] State file corruption handling
+
+### Initial Setup
+- [x] Pre-populated all 9 channels with 874 videos
+- [x] Configured cron job for daily execution
 
 ## Maintenance Tasks
 
@@ -62,8 +67,8 @@
 - [ ] Re-export browser cookies if yt-dlp fails
 
 ### On Adding New Channel
-- [ ] Run `./add_channel.sh <channel_id>` to pre-populate recent videos
-- [ ] Optionally adjust `--limit` to control how many historical videos are tracked
+- [x] Run `./add_channel.sh <channel_id>` to pre-populate recent videos
+- [x] Optionally adjust `--limit` to control how many historical videos are tracked
 
 ## Known Issues
 
@@ -84,3 +89,4 @@
 - [ ] Custom summary templates per channel
 - [ ] Statistics/analytics dashboard
 - [ ] API health monitoring
+- [ ] Summary archive/database for historical search

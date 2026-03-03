@@ -544,11 +544,14 @@ def create_summary_prompt(transcript: str) -> str:
 Transcript with timestamps:
 {transcript}
 
-Please provide these 2 sections (keep total output under 2000 characters):
+Please provide these 2 sections (keep total output under 2500 characters):
 
 1. Key Takeaways - 4-5 brief insights as bullet points (start each line with "•")
 
-2. Detailed Summary with Timestamps - Break into 4-5 sections:
+2. Detailed Summary with Timestamps - Break into 6-8 even sections covering the ENTIRE video:
+   - Distribute sections evenly across the full video timeline
+   - Each section should cover approximately 1/6 to 1/8 of the video
+   - Include ALL major topics from beginning to end
    - Time range (start - end)
    - Section title
    - 2-3 sentences summary
@@ -638,10 +641,6 @@ def format_output(summary: str, video_info: Dict) -> str:
     published = video_info.get('published', '')
 
     output = [
-        separator,
-        "<b>📺 NEW VIDEO SUMMARY</b>",
-        separator,
-        "",
         f"<b>Channel:</b> {channel}",
         f"<b>Video:</b> \"{title}\"",
         f"<b>URL:</b> {url}",
